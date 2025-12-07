@@ -157,74 +157,61 @@ class ReinforceTrainer:
         batch_size: int,
         max_steps: int,
     ) -> Dict[str, Tensor]:
-        """
-        Chạy trajectory cho 1 batch episode.
-
-        Returns dict với các tensor shape [T, B, ...]:
-            log_probs: [T, B]
-            rewards: [T, B]
-            values: [T, B]
-            entropies: [T, B]
-            masks: [T, B]  (1 = còn sống, 0 = done)
-        """
+        
         self.policy.train()
         self.value_net.train()
 
-        # reset env
         state: SVRPState = env.reset(batch_size)
-
         B = batch_size
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
 
-        log_probs_list: List[Tensor] = []
-        rewards_list: List[Tensor] = []
-        values_list: List[Tensor] = []
-        entropies_list: List[Tensor] = []
-        masks_list: List[Tensor] = []
+        lstm_hidden = None 
+
+        log_probs_list = []
+        rewards_list = []
+        values_list = []
+        entropies_list = []
+        masks_list = []
 
         for t in range(max_steps):
-            alive = (~done).float() 
+            alive = (~done).float()
             action_mask = env.get_action_mask().to(self.device)
 
-            # policy forward
-            logits = self.policy(state, action_mask)  # [B,K,N]
+            logits, next_lstm_hidden = self.policy(state, action_mask, lstm_hidden)
+            
+            lstm_hidden = next_lstm_hidden 
+
+            # Masking logits
             logits = logits.masked_fill(~action_mask, -1e9)
+            probs = torch.softmax(logits, dim=-1)
+            log_probs_all = torch.log_softmax(logits, dim=-1)
 
-            # distribution
-            probs = torch.softmax(logits, dim=-1)  # [B,K,N]
-            log_probs_all = torch.log_softmax(logits, dim=-1)  # [B,K,N]
-
-            # sample action cho mỗi vehicle
+            # Sampling Action
             B_, K, N = probs.shape
             probs_flat = probs.view(B_ * K, N)
-            actions_flat = torch.multinomial(probs_flat, 1)  # [B*K,1]
-            actions = actions_flat.view(B_, K)  # [B,K]
+            actions_flat = torch.multinomial(probs_flat, 1)
+            actions = actions_flat.view(B_, K)
 
-            # log_prob của action đã chọn
-            log_prob_actions = self.policy.log_prob_of_actions(logits, actions)  # [B,K]
-            # gộp log_prob các vehicle thành 1 scalar cho mỗi env
-            log_prob_sum = log_prob_actions.sum(dim=1)  # [B]
+            log_prob_actions = self.policy.log_prob_of_actions(logits, actions)
+            log_prob_sum = log_prob_actions.sum(dim=1)
 
-            # entropy (cho regularization)
-            entropy_per_veh = -(probs * log_probs_all).sum(dim=-1)  # [B,K]
-            entropy = entropy_per_veh.mean(dim=1)  # [B]
+            entropy_per_veh = -(probs * log_probs_all).sum(dim=-1)
+            entropy = entropy_per_veh.mean(dim=1)
 
-            # values = self.value_net(state)  # [B]
-            values = self.value_net(probs.detach())  # [B]
+            values = self.value_net(probs.detach()) 
 
-            # step environment
             next_state, reward, done_step, _ = env.step(actions)
-            reward = reward.to(self.device)        # [B]
-            done_step = done_step.to(self.device)  # [B]
+            reward = reward.to(self.device)
+            done_step = done_step.to(self.device)
 
             done = done | done_step
-            mask = (~done).float()  # [B], 1 nếu episode còn tiếp tục
+            mask = (~done).float()
 
             rewards_list.append(reward * alive)
             masks_list.append(alive)
-            log_probs_list.append(log_prob_sum)   # [B]
-            values_list.append(values)           # [B]
-            entropies_list.append(entropy)       # [B]
+            log_probs_list.append(log_prob_sum)
+            values_list.append(values)
+            entropies_list.append(entropy)
 
             state = next_state
 
@@ -261,7 +248,6 @@ class ReinforceTrainer:
         returns = torch.zeros_like(rewards, device=device)
         G = torch.zeros(B, device=device)
 
-        # đi từ cuối về đầu
         for t in reversed(range(T)):
             G = rewards[t] + self.gamma * G * masks[t]
             returns[t] = G

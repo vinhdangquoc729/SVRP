@@ -57,15 +57,17 @@ class GreedyInference(InferenceStrategy):
 
         routes: List[List[int]] = [[0] for _ in range(K)]
 
+        lstm_hidden = None
         total_reward = 0.0
         steps = 0
 
         while (not done.all()) and steps < self.max_steps:
-            action_mask: Tensor = env.get_action_mask()  # [1,K,N]
-            logits: Tensor = self.policy(state, action_mask)  # [1,K,N]
+            action_mask = env.get_action_mask()  # [1,K,N]
+            logits, next_lstm_hidden = self.policy(state, action_mask, lstm_hidden)  # [1,K,N]
+            lstm_hidden = next_lstm_hidden
             logits = logits.masked_fill(~action_mask, float("-inf"))
 
-            actions: Tensor = torch.argmax(logits, dim=-1)  # [1,K]
+            actions = torch.argmax(logits, dim=-1)          # [1,K]
             actions_cpu = actions[0].tolist()               # list length K
 
             for v in range(K):
