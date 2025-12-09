@@ -159,40 +159,53 @@ class SVRPEnvironment:
         return self.state, rewards, done, info
 
     def get_action_mask(self) -> Tensor:
-        """
-        Sinh mask hợp lệ cho action:
-        Returns:
-            mask: [B, K, N] với:
-              - True: action hợp lệ
-              - False: action không hợp lệ
-        Logic:
-          - depot (0) luôn hợp lệ
-          - node i > 0 không hợp lệ nếu demand[:, i] == 0 (đã hết demand)
-          - node i > 0 không hợp lệ cho vehicle v nếu load_v == 0
-        """
-        # assert self.state is not None, "Call reset() before get_action_mask()."
+            """
+            Sinh mask hợp lệ cho action:
+            Returns:
+                mask: [B, K, N] với:
+                - True: action hợp lệ
+                - False: action không hợp lệ
+            Logic cập nhật:
+            - Node khách (i > 0): Chỉ hợp lệ nếu còn demand.
+            - Depot (0): 
+                + Luôn hợp lệ nếu xe HẾT hàng (load = 0) để về refill.
+                + Luôn hợp lệ nếu HẾT sạch khách (finished) để về kết thúc.
+                + BỊ CẤM (False) nếu xe CÒN hàng VÀ CÒN khách (để ép agent đi khách tiếp).
+            """
+            # assert self.state is not None, "Call reset() before get_action_mask()."
 
-        state = self.state
-        B = self.batch_size
-        K = self.cfg.num_vehicles
-        N = self.cfg.num_nodes
-        device = self.device
+            state = self.state
+            B = self.batch_size
+            K = self.cfg.num_vehicles
+            N = self.cfg.num_nodes
+            device = self.device
 
-        demand = state.customers.demand  # [B, N]
-        loads = state.vehicles.loads     # [B, K]
+            demand = state.customers.demand  # [B, N]
+            loads = state.vehicles.loads     # [B, K]
 
-        mask = torch.ones(B, K, N, dtype=torch.bool, device=device)
+            # 1. Khởi tạo mask: Mặc định True hết
+            mask = torch.ones(B, K, N, dtype=torch.bool, device=device)
 
-        no_demand = (demand <= 1e-6)
-        mask = mask & ~no_demand.unsqueeze(1).expand(-1, K, -1)
+            # 2. Mask Customer: Cấm đi đến khách đã hết demand
+            no_demand = (demand <= 1e-6)
+            
+            mask = mask & ~no_demand.unsqueeze(1).expand(-1, K, -1)
 
-        mask[:, :, 0] = True
+            # 3. Mask Depot (Node 0) - Logic "Ép đi khách" của bạn
+            # Điều kiện để về depot:
+            # a. Xe hết hàng (cần về nạp): loads <= epsilon
+            is_empty_load = (loads <= 1e-6) # [B, K]
+            
+            # b. Đã hết sạch khách trên bản đồ: sum(demand) ~ 0
+            total_demand = demand.sum(dim=1) # [B]
+            is_all_served = (total_demand <= 1e-6) # [B]
+            is_all_served = is_all_served.unsqueeze(1).expand(-1, K) # [B, K]
+            
+            # Ngược lại: Nếu (Còn hàng) VÀ (Còn khách) -> Cấm về 0
+            can_visit_depot = is_empty_load | is_all_served
+            
+            mask[:, :, 0] = can_visit_depot
 
-        no_load = (loads <= 1e-6)  # [B, K]
-        if no_load.any():
-            idx = torch.nonzero(no_load, as_tuple=False)  # [*, 2] (b, v)
-            for b, v in idx.tolist():
-                mask[b, v, 1:] = False
-                mask[b, v, 0] = True
+            mask[:, :, 0] = can_visit_depot
 
-        return mask
+            return mask

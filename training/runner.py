@@ -10,7 +10,7 @@ from env.scenario import ScenarioConfig
 from env.svrp_env import SVRPEnvironment
 from models.policy import PolicyNetwork
 from training.reinforce import ReinforceTrainer
-from inference import GreedyInference, SamplingInference
+from inference import GreedyInference, SamplingInference, HybridEvolutionaryInference
 import matplotlib.pyplot as plt
 import math
 from env.rendering import plot_instance
@@ -60,24 +60,26 @@ class ExperimentRunner:
         self.trainer = ReinforceTrainer(
             policy=self.policy,
             scenario=scenario,
-            # embedding_dim=train_cfg.d_model,
             lr=train_cfg.lr,
-            # baseline_lr=train_cfg.baseline_lr,
             entropy_weight=train_cfg.entropy_weight,
             device=self.device,
         )
 
-        if inference_name == "greedy":
-            self.inference = GreedyInference(self.policy, scenario, device=self.device)
-        elif inference_name == "sampling":
-            self.inference = SamplingInference(
-                self.policy,
-                scenario,
-                device=self.device,
-                num_samples=num_samples_sampling,
-            )
-        else:
-            raise ValueError(f"Unknown inference strategy: {inference_name}")
+        self.inference_rl = SamplingInference(
+            self.policy, scenario, device=self.device, num_samples=20
+        )
+        
+        self.inference_ea = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30,
+            init_method="rl" 
+        )
+
+        self.inference_pure_ga = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30, 
+            init_method="random"
+        )
 
         self.save_dir = Path(train_cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -96,7 +98,7 @@ class ExperimentRunner:
 
             mean_reward = stats.mean_reward
             policy_loss = stats.policy_loss
-            baseline_loss = stats.value_loss  # value_net loss
+            baseline_loss = stats.value_loss 
 
             # Logging console
             print(
@@ -136,28 +138,44 @@ class ExperimentRunner:
 
     def evaluate(self, num_instances: int) -> float:
         self.policy.eval()
-        total_cost = 0.0
+        total_cost_rl = 0.0
+        total_cost_ea = 0.0
+        total_cost_pure_ga = 0.0
 
         for i in range(num_instances):
-            routes, cost, info = self.inference.solve_one(self.env)
-            total_cost += cost
-
             # print(
             #     f"[Eval {i+1}/{num_instances}] cost = {cost:.4f} | "
             #     f"routes = {routes}"
             # )
 
-            self.env.reset(batch_size=1)
+            state = self.env.reset(batch_size=1)
+            state_backup = state.clone()
+
+            routes, cost_rl, info_rl = self.inference_rl.solve_one(self.env)
+            total_cost_rl += cost_rl
+            # print(f"  -> RL cost: {cost_rl:.4f}")
+
+            self.env.state = state_backup.clone()
+
+            routes, cost_ea, info_ea = self.inference_ea.solve_one(self.env)
+            total_cost_ea += cost_ea
+            # print(f"  -> EA cost: {cost_ea:.4f}")
+
+            self.env.state = state_backup.clone()
+            routes, cost_ga, info_pure_ga = self.inference_pure_ga.solve_one(self.env)
+            total_cost_pure_ga += cost_ga
+            # print(f"  -> Pure GA cost: {cost_ga:.4f}")
 
             # Save image for the first 3 instances
             if i < 3:
                 save_path = self.save_dir / f"instance_{i+1}.png"
                 plot_instance(self.env.state, batch_idx=0, routes=routes, save_path=str(save_path))
 
-        mean_cost = total_cost / num_instances
-        print(f"===> Eval mean cost over {num_instances} instances: {mean_cost:.4f}")
-        return mean_cost
-
+        mean_cost_rl = total_cost_rl / num_instances
+        mean_cost_ea = total_cost_ea / num_instances
+        mean_cost_pure_ga = total_cost_pure_ga / num_instances
+        print(f"===> Eval mean cost over {num_instances} instances: RL = {mean_cost_rl:.4f}, RL + GA = {mean_cost_ea:.4f}, Pure GA = {mean_cost_pure_ga:.4f}")
+        return mean_cost_ea
     def _save(self, path_prefix: Path):
         path_prefix = Path(path_prefix)
         self.trainer.save(str(path_prefix))
