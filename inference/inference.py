@@ -198,31 +198,29 @@ class HybridEvolutionaryInference(InferenceStrategy):
         num_samples_init: int = 30,
         generations: int = 30,
         mutation_rate: float = 0.1,
-        init_method: Literal["rl", "random"] = "rl"  # <--- THÊM THAM SỐ NÀY
+        init_method: Literal["rl", "random"] = "rl",
+        strategy: Literal["ga", "mpeax", "als", "special_hybrid"] = "ga"
     ):
         super().__init__(policy, scenario, device)
         self.sampler = SamplingInference(policy, scenario, device, num_samples=num_samples_init)
         self.pop_size = num_samples_init
         self.generations = generations
         self.mutation_rate = mutation_rate
-        self.init_method = init_method # Lưu lại phương pháp khởi tạo
+        self.init_method = init_method
+        self.strategy = strategy
 
     def solve_one(self, env) -> Tuple[List[List[int]], float, Dict[str, Any]]:
         state = env.state
         demands = state.customers.demand[0].cpu().numpy()
-        coords = state.customers.coords[0].cpu().numpy()
+        dist_matrix = state.customers.travel_cost[0].cpu().numpy() 
         capacity = env.cfg.capacity
+        num_vehicles = self.scenario.num_vehicles
         
-        N_nodes = coords.shape[0] 
+        N_nodes = demands.shape[0] 
         num_customers = N_nodes - 1
         
-        dist_matrix = np.zeros((N_nodes, N_nodes))
-        for i in range(N_nodes):
-            diff = coords[i] - coords
-            dist_matrix[i] = np.sqrt(np.sum(diff**2, axis=1))
-
+        # 1. Initialization
         population = []
-        
         if self.init_method == "rl":
             for _ in range(self.pop_size):
                 routes, _, _ = self.sampler._run_single_rollout(env)
@@ -252,28 +250,114 @@ class HybridEvolutionaryInference(InferenceStrategy):
 
         best_chrom = population[0]
         best_fitness = float('inf')
+        
+        # Determine initial fitness
+        fitnesses = []
+        for chrom in population:
+            cost = self._evaluate_chromosome(chrom, demands, dist_matrix, capacity, num_vehicles)
+            fitnesses.append(cost)
+            if cost < best_fitness:
+                best_fitness = cost
+                best_chrom = chrom
 
+        # Special Hybrid variables
+        special_ind = copy.deepcopy(best_chrom)
+        special_fitness = best_fitness
+        stagnation_counter = 0
+        STAGNATION_LIMIT = 5
+        
+        # 2. Evolution Loop
         for gen in range(self.generations):
-            fitnesses = []
-            for chrom in population:
-                cost = self._evaluate_chromosome(chrom, demands, dist_matrix, capacity)
-                fitnesses.append(cost)
-                if cost < best_fitness:
-                    best_fitness = cost
-                    best_chrom = chrom
-
             new_population = []
+            
+            # Elitism: keep best
             best_idx = np.argmin(fitnesses)
             new_population.append(population[best_idx])
 
             while len(new_population) < self.pop_size:
-                p1 = self._tournament_selection(population, fitnesses)
-                p2 = self._tournament_selection(population, fitnesses)
-                child = self._ordered_crossover(p1, p2)
+                # Crossover
+                if self.strategy == "mpeax":
+                    # MPEAX logic
+                    if random.random() < 0.8: # High prob for MPEAX
+                         parents = [self._tournament_selection(population, fitnesses) for _ in range(4)]
+                         child = self._multi_parent_edge_assembly_crossover(parents)
+                    else:
+                         p1 = self._tournament_selection(population, fitnesses)
+                         p2 = self._tournament_selection(population, fitnesses)
+                         child = self._ordered_crossover(p1, p2)
+                else:
+                    # Std GA, ALS, Special Hybrid use standard crossover
+                    p1 = self._tournament_selection(population, fitnesses)
+                    p2 = self._tournament_selection(population, fitnesses)
+                    child = self._ordered_crossover(p1, p2)
+                
+                # Mutation
                 if random.random() < self.mutation_rate:
                     child = self._swap_mutation(child)
+                
+                # Local Search
+                if self.strategy == "als":
+                     child = self._local_search_2opt(child, demands, dist_matrix, capacity, num_vehicles, limit=20)
+
                 new_population.append(child)
+            
             population = new_population
+            
+            # Re-evaluate
+            fitnesses = []
+            current_gen_best_fitness = float('inf')
+            current_gen_best_chrom = None
+
+            for i, chrom in enumerate(population):
+                cost = self._evaluate_chromosome(chrom, demands, dist_matrix, capacity, num_vehicles)
+                fitnesses.append(cost)
+                if cost < current_gen_best_fitness:
+                    current_gen_best_fitness = cost
+                    current_gen_best_chrom = chrom
+            
+            # Update global best
+            if current_gen_best_fitness < best_fitness:
+                best_fitness = current_gen_best_fitness
+                best_chrom = current_gen_best_chrom
+
+            # --- Special Hybrid Logic ---
+            if self.strategy == "special_hybrid":
+                # Optimizing special individual using LKH (2-opt proxy)
+                prev_special_fitness = special_fitness
+                
+                # Apply deep local search to special_ind
+                special_ind = self._local_search_2opt(special_ind, demands, dist_matrix, capacity, num_vehicles, limit=100)
+                special_fitness = self._evaluate_chromosome(special_ind, demands, dist_matrix, capacity, num_vehicles)
+                
+                if special_fitness < best_fitness:
+                    best_fitness = special_fitness
+                    best_chrom = copy.deepcopy(special_ind)
+                
+                # Check Stagnation
+                if special_fitness >= prev_special_fitness - 1e-5: # No improvement
+                    stagnation_counter += 1
+                else:
+                    stagnation_counter = 0
+                
+                # If stagnant, challenge
+                if stagnation_counter >= STAGNATION_LIMIT:
+                    # Pick random Challenger
+                    challenger = copy.deepcopy(random.choice(population))
+                    # Optimize Challenger
+                    challenger = self._local_search_2opt(challenger, demands, dist_matrix, capacity, num_vehicles, limit=100)
+                    chall_fitness = self._evaluate_chromosome(challenger, demands, dist_matrix, capacity, num_vehicles)
+                    
+                    if chall_fitness < special_fitness:
+                        # Replace
+                        special_ind = challenger
+                        special_fitness = chall_fitness
+                        stagnation_counter = 0
+                        # Also update global best if needed
+                        if special_fitness < best_fitness:
+                            best_fitness = special_fitness
+                            best_chrom = copy.deepcopy(special_ind)
+                    else:
+                         pass
 
         final_routes = self._split_chromosome(best_chrom, demands, capacity)
         formatted_routes = []
@@ -281,18 +365,28 @@ class HybridEvolutionaryInference(InferenceStrategy):
             formatted_routes.append([0] + r + [0])
         while len(formatted_routes) < self.scenario.num_vehicles:
             formatted_routes.append([0])
+        
+        # Clip if exceeded (should be handled by penalty, but for safety in output)
+        formatted_routes = formatted_routes[:self.scenario.num_vehicles]
 
         return formatted_routes, best_fitness, {"generations": self.generations}
 
-    def _evaluate_chromosome(self, chrom, demands, dist_mat, capacity):
+    def _evaluate_chromosome(self, chrom, demands, dist_mat, capacity, num_vehicles=None):
         routes = self._split_chromosome(chrom, demands, capacity)
         total_dist = 0
+        
+        # Valid solution check: Number of routes <= num_vehicles
+        # If num_vehicles is provided and exceeded, add penalty
+        penalty = 0.0
+        if num_vehicles is not None and len(routes) > num_vehicles:
+            penalty = (len(routes) - num_vehicles) * 1000.0 # Heavy penalty
+            
         for route in routes:
             full_route = [0] + route + [0]
             for i in range(len(full_route) - 1):
                 u, v = full_route[i], full_route[i+1]
                 total_dist += dist_mat[u][v]
-        return total_dist
+        return total_dist + penalty
 
     def _split_chromosome(self, chrom, demands, capacity):
         routes = []
@@ -339,6 +433,81 @@ class HybridEvolutionaryInference(InferenceStrategy):
                 child[i] = remaining.pop(0)
                 
         return child
+
+    def _multi_parent_edge_assembly_crossover(self, parents):
+        """
+        Simplified MPEAX: Construct a child by aggregating edges from parents
+        """
+        if not parents: return []
+        size = len(parents[0])
+        if size < 2: return parents[0]
+
+        # Build edge frequency map
+        adj = {i: [] for i in range(1, size + 2)} 
+        
+        for p in parents:
+            for i in range(size - 1):
+                u, v = p[i], p[i+1]
+                adj.setdefault(u, []).append(v)
+                adj.setdefault(v, []).append(u)
+        
+        child = []
+        current_node = parents[0][0]
+        child.append(current_node)
+        visited = {current_node}
+        
+        while len(child) < size:
+            candidates = []
+            if current_node in adj:
+                for neighbor in adj[current_node]:
+                    if neighbor not in visited:
+                        candidates.append(neighbor)
+            
+            if candidates:
+                counts = {}
+                for c in candidates:
+                    counts[c] = counts.get(c, 0) + 1
+                best_c = max(counts, key=counts.get)
+                next_node = best_c
+            else:
+                unvisited = [n for n in parents[0] if n not in visited]
+                if not unvisited: break 
+                next_node = random.choice(unvisited)
+            
+            child.append(next_node)
+            visited.add(next_node)
+            current_node = next_node
+            
+        return child
+
+    def _local_search_2opt(self, chrom, demands, dist_mat, capacity, num_vehicles=None, limit=50):
+        """
+        2-opt Local Search (Proxy for LKH)
+        """
+        best_chrom = chrom
+        best_cost = self._evaluate_chromosome(chrom, demands, dist_mat, capacity, num_vehicles)
+        
+        improved = True
+        count = 0
+        
+        while improved and count < limit:
+            improved = False
+            count += 1
+            for i in range(len(chrom) - 1):
+                for j in range(i + 1, len(chrom)):
+                    if j - i == 1: continue 
+                    
+                    new_chrom = chrom[:i] + chrom[i:j][::-1] + chrom[j:]
+                    cost = self._evaluate_chromosome(new_chrom, demands, dist_mat, capacity, num_vehicles)
+                    
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_chrom = new_chrom
+                        improved = True
+                        break 
+                if improved: break
+        
+        return best_chrom
 
     def _swap_mutation(self, chrom):
         if len(chrom) < 2: return chrom

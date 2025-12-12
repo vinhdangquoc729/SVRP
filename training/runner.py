@@ -65,20 +65,51 @@ class ExperimentRunner:
             device=self.device,
         )
 
+        # 1. RL (Baseline)
         self.inference_rl = SamplingInference(
             self.policy, scenario, device=self.device, num_samples=20
         )
         
+        # 2. RL + GA (Original)
         self.inference_ea = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30,
-            init_method="rl" 
+            init_method="rl", strategy="ga"
         )
 
+        # 3. Pure GA (Original)
         self.inference_pure_ga = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
-            init_method="random"
+            init_method="random", strategy="ga"
+        )
+
+        # 4. RL + MPEAX
+        self.inference_rl_mpeax = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30, 
+            init_method="rl", strategy="mpeax"
+        )
+
+        # 5. Pure MPEAX
+        self.inference_pure_mpeax = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30, 
+            init_method="random", strategy="mpeax"
+        )
+
+        # 6. RL + Special Hybrid
+        self.inference_rl_special = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30, 
+            init_method="rl", strategy="special_hybrid"
+        )
+        
+        # 7. Pure Special Hybrid
+        self.inference_pure_special = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=20, generations=30, 
+            init_method="random", strategy="special_hybrid"
         )
 
         self.save_dir = Path(train_cfg.save_dir)
@@ -138,44 +169,65 @@ class ExperimentRunner:
 
     def evaluate(self, num_instances: int) -> float:
         self.policy.eval()
-        total_cost_rl = 0.0
-        total_cost_ea = 0.0
-        total_cost_pure_ga = 0.0
+        costs = {
+            "RL": 0.0,
+            "RL_GA": 0.0, "Pure_GA": 0.0,
+            "RL_MPEAX": 0.0, "Pure_MPEAX": 0.0,
+            "RL_Special": 0.0, "Pure_Special": 0.0,
+        }
 
         for i in range(num_instances):
-            # print(
-            #     f"[Eval {i+1}/{num_instances}] cost = {cost:.4f} | "
-            #     f"routes = {routes}"
-            # )
 
-            state = self.env.reset(batch_size=1)
-            state_backup = state.clone()
 
-            routes, cost_rl, info_rl = self.inference_rl.solve_one(self.env)
-            total_cost_rl += cost_rl
-            # print(f"  -> RL cost: {cost_rl:.4f}")
 
-            self.env.state = state_backup.clone()
 
-            routes, cost_ea, info_ea = self.inference_ea.solve_one(self.env)
-            total_cost_ea += cost_ea
-            # print(f"  -> EA cost: {cost_ea:.4f}")
+            
+            state_base = self.env.reset(batch_size=1)
+            
+            # Helper to run inference
+            def run_strat(name, inf_obj, save_img=False):
+                self.env.state = state_base.clone()
+                routes, cost, _ = inf_obj.solve_one(self.env)
+                costs[name] += cost
+                if save_img:
+                     plot_instance(state_base, 0, routes, title=f"{name} (Cost {cost:.2f})", 
+                                   save_path=str(self.save_dir / f"inst_{i}_{name}.png"))
+                return cost
+            
+            save = (i == 0) # Save image for 1st instance
+            
+            # 1. RL
+            run_strat("RL", self.inference_rl, save)
+            
+            # 2. RL + GA
+            run_strat("RL_GA", self.inference_ea, save)
+            
+            # 3. Pure GA
+            run_strat("Pure_GA", self.inference_pure_ga, save)
+            
+            # 4. RL + MPEAX
+            run_strat("RL_MPEAX", self.inference_rl_mpeax, save)
+            
+            # 5. Pure MPEAX
+            run_strat("Pure_MPEAX", self.inference_pure_mpeax, save)
+            
+            # 6. RL + Special Hybrid
+            run_strat("RL_Special", self.inference_rl_special, save)
+            
+            # 7. Pure Special Hybrid
+            run_strat("Pure_Special", self.inference_pure_special, save)
 
-            self.env.state = state_backup.clone()
-            routes, cost_ga, info_pure_ga = self.inference_pure_ga.solve_one(self.env)
-            total_cost_pure_ga += cost_ga
-            # print(f"  -> Pure GA cost: {cost_ga:.4f}")
-
-            # Save image for the first 3 instances
-            if i < 3:
-                save_path = self.save_dir / f"instance_{i+1}.png"
-                plot_instance(self.env.state, batch_idx=0, routes=routes, save_path=str(save_path))
-
-        mean_cost_rl = total_cost_rl / num_instances
-        mean_cost_ea = total_cost_ea / num_instances
-        mean_cost_pure_ga = total_cost_pure_ga / num_instances
-        print(f"===> Eval mean cost over {num_instances} instances: RL = {mean_cost_rl:.4f}, RL + GA = {mean_cost_ea:.4f}, Pure GA = {mean_cost_pure_ga:.4f}")
-        return mean_cost_ea
+        means = {k: v / num_instances for k, v in costs.items()}
+        print(f"===> Eval Results (N={num_instances}):")
+        print(f"  1. RL              : {means['RL']:.4f}")
+        print(f"  2. RL + GA         : {means['RL_GA']:.4f}")
+        print(f"  3. Pure GA         : {means['Pure_GA']:.4f}")
+        print(f"  4. RL + MPEAX      : {means['RL_MPEAX']:.4f}")
+        print(f"  5. Pure MPEAX      : {means['Pure_MPEAX']:.4f}")
+        print(f"  6. RL + Special    : {means['RL_Special']:.4f}")
+        print(f"  7. Pure Special    : {means['Pure_Special']:.4f}")
+        
+        return means["RL_Special"]
     def _save(self, path_prefix: Path):
         path_prefix = Path(path_prefix)
         self.trainer.save(str(path_prefix))
