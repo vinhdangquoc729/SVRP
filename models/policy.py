@@ -1,5 +1,6 @@
-from typing import Optional, Tuple
+# svrp_rl/policy.py
 
+from typing import Optional, Tuple
 import math
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ from torch import Tensor
 from env.scenario import ScenarioConfig
 from env.state import SVRPState
 from .embedding import CustomerEmbedding, VehicleEmbedding, build_embeddings
+
 
 class PolicyNetwork(nn.Module):
     def __init__(self, scenario: ScenarioConfig, d_model: int = 128, d_k: Optional[int] = None):
@@ -22,7 +24,6 @@ class PolicyNetwork(nn.Module):
 
         self.key_proj = nn.Linear(d_model, self.d_k)
         self.query_proj = nn.Linear(d_model, self.d_k)
-        
         self.dropout = nn.Dropout(p=0.1)
 
     def forward(
@@ -31,14 +32,11 @@ class PolicyNetwork(nn.Module):
         mask: Optional[Tensor] = None,
         lstm_hidden: Optional[Tuple[Tensor, Tensor]] = None
     ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
-        customers = state.customers
-        vehicles = state.vehicles
-
-        node_emb = self.customer_embedding(customers.weather, customers.demand, customers.travel_cost)
-        
-        vehicle_emb, new_hidden = self.vehicle_embedding(
-            vehicles.positions, vehicles.loads, vehicles.time, lstm_hidden
+        embeddings, new_hidden = build_embeddings(
+            state, self.customer_embedding, self.vehicle_embedding, lstm_hidden
         )
+        node_emb = embeddings.node_emb       # [B, N, d_model]
+        vehicle_emb = embeddings.vehicle_emb # [B, K, d_model]
 
         K_val = self.key_proj(node_emb)        # [B, N, d_k]
         Q_val = self.query_proj(vehicle_emb)   # [B, K, d_k]
@@ -47,10 +45,15 @@ class PolicyNetwork(nn.Module):
 
         if mask is not None:
             logits = logits.masked_fill(~mask, -1e9)
-            
+
         return logits, new_hidden
 
     def log_prob_of_actions(self, logits: Tensor, actions: Tensor) -> Tensor:
+        """
+        logits: [B, K, N]
+        actions: [B, K] indices selected
+        returns selected_log_probs: [B, K]
+        """
         log_probs = F.log_softmax(logits, dim=-1)
         B, K, N = logits.shape
         batch_idx = torch.arange(B, device=logits.device).unsqueeze(1).expand(-1, K)

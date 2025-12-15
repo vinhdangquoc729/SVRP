@@ -7,6 +7,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from env.scenario import ScenarioConfig
+from env.state import SVRPState
 from env.svrp_env import SVRPEnvironment
 from models.policy import PolicyNetwork
 from training.reinforce import ReinforceTrainer
@@ -31,12 +32,9 @@ class TrainConfig:
     seed: int = 42
     d_model: int = 128  # embedding dim cho policy
 
-
 InferenceName = Literal["greedy", "sampling"]
 
-
 class ExperimentRunner:
-
     def __init__(
         self,
         scenario: ScenarioConfig,
@@ -119,6 +117,12 @@ class ExperimentRunner:
 
         self.best_eval_cost: float = float("inf")
 
+        print(f"Generating fixed validation set of {train_cfg.test_episodes} episodes...")
+        self.validation_set = []
+        for _ in range(train_cfg.test_episodes):
+            state = self.env.reset(batch_size=1)
+            self.validation_set.append(state.clone())
+        print("Validation set generated and stored.")
     def train(self):
         for epoch in range(1, self.cfg.epochs + 1):
             stats = self.trainer.train_batch(
@@ -166,7 +170,6 @@ class ExperimentRunner:
         self._save(final_path)
         print(f"Training done, final model saved to {final_path}")
 
-
     def evaluate(self, num_instances: int) -> float:
         self.policy.eval()
         costs = {
@@ -177,20 +180,15 @@ class ExperimentRunner:
         }
 
         for i in range(num_instances):
-
-
-
-
-            
             state_base = self.env.reset(batch_size=1)
-            
-            # Helper to run inference
+            fixed_state = state_base.clone()
             def run_strat(name, inf_obj, save_img=False):
-                self.env.state = state_base.clone()
+                self.env.reset_by_state(fixed_state)
+                
                 routes, cost, _ = inf_obj.solve_one(self.env)
                 costs[name] += cost
                 if save_img:
-                     plot_instance(state_base, 0, routes, title=f"{name} (Cost {cost:.2f})", 
+                     plot_instance(fixed_state, 0, routes, title=f"{name} (Cost {cost:.2f})", 
                                    save_path=str(self.save_dir / f"inst_{i}_{name}.png"))
                 return cost
             
@@ -234,4 +232,3 @@ class ExperimentRunner:
 
     def load(self, path_prefix: str):
         self.trainer.load(path_prefix)
-

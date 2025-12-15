@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=20)
-    parser.add_argument("--test_episodes", type=int, default=100)
+    parser.add_argument("--test_episodes", type=int, default=10)
     # parser.add_argument("--max_horizon", type=int, default=20)
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--seed", type=int, default=42)

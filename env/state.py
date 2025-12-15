@@ -31,6 +31,8 @@ class SVRPState:
                 demand=self.customers.demand.clone(),
                 travel_cost=self.customers.travel_cost.clone(),
                 coords=self.customers.coords.clone(),
+                time_windows=self.customers.time_windows.clone() if self.customers.time_windows is not None else None,
+                customer_types=self.customers.customer_types.clone() if self.customers.customer_types is not None else None,
             ),
             vehicles=VehicleState(
                 positions=self.vehicles.positions.clone(),

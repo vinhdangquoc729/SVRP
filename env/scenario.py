@@ -18,6 +18,9 @@ class ScenarioConfig:
     fixed_customers: bool = False
     time_windows: bool = True 
 
+    num_customer_types: int = 3
+    tw_jitter: int = 3
+
     device: str = "cpu"
 
     @property
