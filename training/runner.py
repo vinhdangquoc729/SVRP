@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Type
+from typing import Literal, Optional, Type, List, Tuple
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -30,7 +30,7 @@ class TrainConfig:
     save_dir: str = "checkpoints"
     device: str = "cpu"
     seed: int = 42
-    d_model: int = 128  # embedding dim cho policy
+    d_model: int = 128
 
 InferenceName = Literal["greedy", "sampling"]
 
@@ -55,6 +55,7 @@ class ExperimentRunner:
             d_model=train_cfg.d_model,
         ).to(self.device)
 
+        # Lưu ý: ReinforceTrainer phải là phiên bản đã sửa (ko có zero_grad bên trong)
         self.trainer = ReinforceTrainer(
             policy=self.policy,
             scenario=scenario,
@@ -63,58 +64,52 @@ class ExperimentRunner:
             device=self.device,
         )
 
-        # 1. RL (Baseline)
+        # --- INFERENCE STRATEGIES (Cho Evaluation) ---
         self.inference_rl = SamplingInference(
             self.policy, scenario, device=self.device, num_samples=20
         )
-        
-        # 2. RL + GA (Original)
         self.inference_ea = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30,
             init_method="rl", strategy="ga"
         )
-
-        # 3. Pure GA (Original)
         self.inference_pure_ga = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
             init_method="random", strategy="ga"
         )
-
-        # 4. RL + MPEAX
         self.inference_rl_mpeax = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
             init_method="rl", strategy="mpeax"
         )
-
-        # 5. Pure MPEAX
         self.inference_pure_mpeax = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
             init_method="random", strategy="mpeax"
         )
-
-        # 6. RL + Special Hybrid
         self.inference_rl_special = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
             init_method="rl", strategy="special_hybrid"
         )
-        
-        # 7. Pure Special Hybrid
         self.inference_pure_special = HybridEvolutionaryInference(
             self.policy, scenario, device=self.device,
             num_samples_init=20, generations=30, 
             init_method="random", strategy="special_hybrid"
+        )
+        
+        # --- FAST GA FOR TRAINING (Dùng để sinh demo nhanh trong 20 epoch đầu) ---
+        self.inference_fast_ga = HybridEvolutionaryInference(
+            self.policy, scenario, device=self.device,
+            num_samples_init=10, generations=10, 
+            init_method="random", strategy="mpeax"
         )
 
         self.save_dir = Path(train_cfg.save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir is not None else None
-
         self.best_eval_cost: float = float("inf")
 
         print(f"Generating fixed validation set of {train_cfg.test_episodes} episodes...")
@@ -122,32 +117,100 @@ class ExperimentRunner:
         for _ in range(train_cfg.test_episodes):
             state = self.env.reset(batch_size=1)
             self.validation_set.append(state.clone())
-        print("Validation set generated and stored.")
+        print("Validation set generated.")
+
     def train(self):
+        # Cấu hình Chiến thuật
+        WARMUP_EPOCHS = 20     # Chỉ dùng GA hướng dẫn trong 20 epoch đầu
+        LAMBDA_IL = 1.0    # Trọng số Imitation Learning
+        NUM_DEMO_PER_BATCH = 16 # Số lượng mẫu chạy GA
+
+        print(f"Starting Training: {self.cfg.epochs} epochs")
+        print(f" - Phase 1 (Epoch 1-{WARMUP_EPOCHS}): Mixed Strategy (RL + GA Guidance)")
+        print(f" - Phase 2 (Epoch {WARMUP_EPOCHS+1}+): Pure RL (Reinforce)")
+
         for epoch in range(1, self.cfg.epochs + 1):
+            
+            # Reset Env & Lấy State đầu vào cho cả Epoch
+            state = self.env.reset(batch_size=self.cfg.batch_size)
+            initial_state_clone = state.clone() 
+            
+            # Reset Gradients chung
+            self.trainer.policy_optim.zero_grad()
+            self.trainer.value_optim.zero_grad()
+            
+            loss_il = 0.0
+            phase_name = "RL"
+
+            # ===============================================
+            # KIỂM TRA GIAI ĐOẠN (PHASE)
+            # ===============================================
+            if epoch <= WARMUP_EPOCHS:
+                phase_name = "Mixed"
+                
+                # --- PHASE 1: CHẠY GA ĐỂ LẤY DEMO ---
+                demos = []
+                indices_to_solve = list(range(self.cfg.batch_size))[:NUM_DEMO_PER_BATCH]
+                
+                ga_env = SVRPEnvironment(self.scenario, device=self.device)
+                
+                for idx in indices_to_solve:
+                    ga_env.reset(batch_size=1)
+                    # Copy data state thủ công
+                    with torch.no_grad():
+                        ga_env.state.customers.demand.data.copy_(initial_state_clone.customers.demand[idx].unsqueeze(0))
+                        ga_env.state.customers.travel_cost.data.copy_(initial_state_clone.customers.travel_cost[idx].unsqueeze(0))
+                        if hasattr(ga_env.state.customers, 'loc'):
+                             ga_env.state.customers.loc.data.copy_(initial_state_clone.customers.loc[idx].unsqueeze(0))
+                        if hasattr(ga_env.state.vehicles, 'loc'):
+                             ga_env.state.vehicles.loc.data.copy_(initial_state_clone.vehicles.loc[idx].unsqueeze(0))
+
+                    # Chạy GA nhanh
+                    routes, _, _ = self.inference_fast_ga.solve_one(ga_env)
+                    route_flat = routes[0]
+                    demos.append((idx, route_flat))
+                
+                # Tính Gradient Imitation (Cộng dồn vào Policy)
+                self.env.reset_by_state(initial_state_clone)
+                loss_il = self.trainer.backward_imitation(self.env, demos, lambda_il=LAMBDA_IL)
+            
+            else:
+                phase_name = "PureRL"
+                # --- PHASE 2: KHÔNG LÀM GÌ CẢ (SKIP GA) ---
+                loss_il = 0.0
+
+            # ===============================================
+            # CHẠY RL (LUÔN CHẠY TRONG CẢ 2 PHASE)
+            # ===============================================
+            self.env.reset_by_state(initial_state_clone)
+            
+            # Chạy RL Rollout và Backward tích lũy
             stats = self.trainer.train_batch(
-                env=self.env,
+                self.env, 
                 batch_size=self.cfg.batch_size,
-                max_steps=self.cfg.max_steps,
+                max_steps=self.cfg.max_steps
             )
+            
+            # ===============================================
+            # CẬP NHẬT TRỌNG SỐ
+            # ===============================================
+            self.trainer.step_optimizers()
 
-            mean_reward = stats.mean_reward
-            policy_loss = stats.policy_loss
-            baseline_loss = stats.value_loss 
-
-            # Logging console
+            # Logging
             print(
-                f"[Epoch {epoch:03d}/{self.cfg.epochs}] "
-                f"reward (train) = {mean_reward:.4f} | "
-                f"policy_loss = {policy_loss:.4f} | "
-                f"baseline_loss = {baseline_loss:.4f}"
+                f"[Epoch {epoch:03d}/{self.cfg.epochs}] ({phase_name}) "
+                f"Rw: {stats.mean_reward:.2f} | "
+                f"L_RL: {stats.policy_loss:.2f} | "
+                f"L_IL: {loss_il:.4f}"
             )
 
             if self.writer is not None:
-                self.writer.add_scalar("train/reward", mean_reward, epoch)
-                self.writer.add_scalar("train/policy_loss", policy_loss, epoch)
-                self.writer.add_scalar("train/baseline_loss", baseline_loss, epoch)
+                self.writer.add_scalar("train/reward", stats.mean_reward, epoch)
+                self.writer.add_scalar("train/policy_loss", stats.policy_loss, epoch)
+                self.writer.add_scalar("train/imitation_loss", loss_il, epoch)
+                self.writer.add_scalar("train/baseline_loss", stats.value_loss, epoch)
 
+            # --- EVALUATION ---
             if epoch % self.cfg.eval_interval == 0:
                 eval_mean_cost = self.evaluate(self.cfg.test_episodes)
                 if self.writer is not None:
@@ -157,10 +220,7 @@ class ExperimentRunner:
                     self.best_eval_cost = eval_mean_cost
                     best_path = self.save_dir / "model_best"
                     self._save(best_path)
-                    print(
-                        f"  -> New best eval cost {eval_mean_cost:.4f}, "
-                        f"saved to {best_path}"
-                    )
+                    print(f"  -> New best eval cost {eval_mean_cost:.4f}, saved to {best_path}")
 
             if epoch % self.cfg.log_interval == 0:
                 ckpt_path = self.save_dir / f"model_epoch_{epoch}"
@@ -179,12 +239,15 @@ class ExperimentRunner:
             "RL_Special": 0.0, "Pure_Special": 0.0,
         }
 
+        print(f"\n--- Evaluating on {num_instances} instances ---")
         for i in range(num_instances):
-            state_base = self.env.reset(batch_size=1)
-            fixed_state = state_base.clone()
+            if i < len(self.validation_set):
+                fixed_state = self.validation_set[i].clone()
+            else:
+                fixed_state = self.env.reset(batch_size=1).clone()
+
             def run_strat(name, inf_obj, save_img=False):
                 self.env.reset_by_state(fixed_state)
-                
                 routes, cost, _ = inf_obj.solve_one(self.env)
                 costs[name] += cost
                 if save_img:
@@ -192,31 +255,18 @@ class ExperimentRunner:
                                    save_path=str(self.save_dir / f"inst_{i}_{name}.png"))
                 return cost
             
-            save = (i == 0) # Save image for 1st instance
+            save = (i == 0) 
             
-            # 1. RL
             run_strat("RL", self.inference_rl, save)
-            
-            # 2. RL + GA
             run_strat("RL_GA", self.inference_ea, save)
-            
-            # 3. Pure GA
             run_strat("Pure_GA", self.inference_pure_ga, save)
-            
-            # 4. RL + MPEAX
             run_strat("RL_MPEAX", self.inference_rl_mpeax, save)
-            
-            # 5. Pure MPEAX
             run_strat("Pure_MPEAX", self.inference_pure_mpeax, save)
-            
-            # 6. RL + Special Hybrid
             run_strat("RL_Special", self.inference_rl_special, save)
-            
-            # 7. Pure Special Hybrid
             run_strat("Pure_Special", self.inference_pure_special, save)
 
         means = {k: v / num_instances for k, v in costs.items()}
-        print(f"===> Eval Results (N={num_instances}):")
+        print(f"===> Eval Results (Mean Cost):")
         print(f"  1. RL              : {means['RL']:.4f}")
         print(f"  2. RL + GA         : {means['RL_GA']:.4f}")
         print(f"  3. Pure GA         : {means['Pure_GA']:.4f}")
@@ -226,6 +276,7 @@ class ExperimentRunner:
         print(f"  7. Pure Special    : {means['Pure_Special']:.4f}")
         
         return means["RL_Special"]
+
     def _save(self, path_prefix: Path):
         path_prefix = Path(path_prefix)
         self.trainer.save(str(path_prefix))
