@@ -24,14 +24,14 @@ def parse_args():
     parser.add_argument("--max_horizon", type=int, default=100)
 
     # Train config
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--baseline_lr", type=float, default=1e-3)
     parser.add_argument("--entropy_weight", type=float, default=1e-2)
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--log_interval", type=int, default=10)
-    parser.add_argument("--eval_interval", type=int, default=20)
+    parser.add_argument("--eval_interval", type=int, default=10)
     parser.add_argument("--test_episodes", type=int, default=10)
     # parser.add_argument("--max_horizon", type=int, default=20)
     parser.add_argument("--save_dir", type=str, default="checkpoints")

@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional, Type, List, Tuple
+import random
+import numpy as np
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -25,7 +27,7 @@ class TrainConfig:
     entropy_weight: float = 1e-2
     max_steps: int = 100
     log_interval: int = 10
-    eval_interval: int = 20
+    eval_interval: int = 10
     test_episodes: int = 100
     save_dir: str = "checkpoints"
     device: str = "cpu"
@@ -47,6 +49,8 @@ class ExperimentRunner:
         self.cfg = train_cfg
 
         torch.manual_seed(train_cfg.seed)
+        np.random.seed(train_cfg.seed)
+        random.seed(train_cfg.seed)
         self.device = torch.device(train_cfg.device)
         self.env = SVRPEnvironment(scenario, device=self.device)
 
@@ -121,13 +125,20 @@ class ExperimentRunner:
 
     def train(self):
         # Cấu hình Chiến thuật
-        WARMUP_EPOCHS = 20     # Chỉ dùng GA hướng dẫn trong 20 epoch đầu
-        LAMBDA_IL = 1.0    # Trọng số Imitation Learning
+        WARMUP_EPOCHS = 200     # Chỉ dùng GA hướng dẫn trong 20 epoch đầu
+        LAMBDA_IL = 0.8    # Trọng số Imitation Learning
         NUM_DEMO_PER_BATCH = 16 # Số lượng mẫu chạy GA
 
         print(f"Starting Training: {self.cfg.epochs} epochs")
         print(f" - Phase 1 (Epoch 1-{WARMUP_EPOCHS}): Mixed Strategy (RL + GA Guidance)")
         print(f" - Phase 2 (Epoch {WARMUP_EPOCHS+1}+): Pure RL (Reinforce)")
+
+        history =  {
+            "RL": [],
+            "RL_GA": [], "Pure_GA": [],
+            "RL_MPEAX": [], "Pure_MPEAX": [],
+            "RL_Special": [], "Pure_Special": [],
+        }
 
         for epoch in range(1, self.cfg.epochs + 1):
             
@@ -213,14 +224,22 @@ class ExperimentRunner:
             # --- EVALUATION ---
             if epoch % self.cfg.eval_interval == 0:
                 eval_mean_cost = self.evaluate(self.cfg.test_episodes)
-                if self.writer is not None:
-                    self.writer.add_scalar("eval/mean_cost", eval_mean_cost, epoch)
+                history["RL"].append(eval_mean_cost["RL"])
+                history["RL_GA"].append(eval_mean_cost["RL_GA"])
+                history["Pure_GA"].append(eval_mean_cost["Pure_GA"])
+                history["RL_MPEAX"].append(eval_mean_cost["RL_MPEAX"])
+                history["Pure_MPEAX"].append(eval_mean_cost["Pure_MPEAX"])
+                history["RL_Special"].append(eval_mean_cost["RL_Special"])
+                history["Pure_Special"].append(eval_mean_cost["Pure_Special"])
 
-                if eval_mean_cost < self.best_eval_cost:
-                    self.best_eval_cost = eval_mean_cost
+                if self.writer is not None:
+                    self.writer.add_scalar("eval/mean_cost", eval_mean_cost["RL_Special"], epoch)
+
+                if eval_mean_cost["RL_Special"] < self.best_eval_cost:
+                    self.best_eval_cost = eval_mean_cost["RL_Special"]
                     best_path = self.save_dir / "model_best"
                     self._save(best_path)
-                    print(f"  -> New best eval cost {eval_mean_cost:.4f}, saved to {best_path}")
+                    print(f"  -> New best eval cost {eval_mean_cost['RL_Special']:.4f}, saved to {best_path}")
 
             if epoch % self.cfg.log_interval == 0:
                 ckpt_path = self.save_dir / f"model_epoch_{epoch}"
@@ -229,6 +248,28 @@ class ExperimentRunner:
         final_path = self.save_dir / "model_final"
         self._save(final_path)
         print(f"Training done, final model saved to {final_path}")
+
+        # Calculate win rate (percentage of times winning) matrix of each pair algorithms like ("RL", "RL_GA"), ("RL", "Pure_GA"), ...
+        algorithms = ["RL", "RL_GA", "Pure_GA", "RL_MPEAX", "Pure_MPEAX", "RL_Special", "Pure_Special"]
+        win_rate = {}
+
+        for algo1 in algorithms:
+            win_rate[algo1] = {}
+            for algo2 in algorithms:
+                if algo1 == algo2:
+                    win_rate[algo1][algo2] = 0.5
+                else:
+                    win_rate[algo1][algo2] = (history[algo1] < history[algo2]).sum() / len(history[algo1])
+
+        # Print win rate matrix
+        print("\nWin rate matrix:")
+        for algo1 in algorithms:
+            print(" ".join(f"{win_rate[algo1][algo2]:.2f}" for algo2 in algorithms))
+
+        # Save win rate matrix to file
+        with open(self.save_dir / "win_rate_matrix.txt", "w") as f:
+            for algo1 in algorithms:
+                f.write(" ".join(f"{win_rate[algo1][algo2]:.2f}" for algo2 in algorithms) + "\n")
 
     def evaluate(self, num_instances: int) -> float:
         self.policy.eval()
@@ -275,7 +316,7 @@ class ExperimentRunner:
         print(f"  6. RL + Special    : {means['RL_Special']:.4f}")
         print(f"  7. Pure Special    : {means['Pure_Special']:.4f}")
         
-        return means["RL_Special"]
+        return means
 
     def _save(self, path_prefix: Path):
         path_prefix = Path(path_prefix)
