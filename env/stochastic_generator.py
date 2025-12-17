@@ -123,6 +123,7 @@ class StochasticInstanceGenerator:
         return (weather,demand,travel_cost,coords,time_windows,customer_type,)
 
 if __name__ == "__main__":
+    torch.manual_seed(42)
     scenario = ScenarioConfig(
         num_customers=10,
         num_vehicles=1,

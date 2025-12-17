@@ -74,7 +74,8 @@ class TrainStats:
 
 class ReinforceTrainer:
     """
-    ∇_θ J(θ) ≈ 1/B ∑_b ∑_t (R_t^b - V(s_t^b)) ∇_θ log π_θ(a_t^b | s_t^b)
+    Mixed Strategy Trainer: Hỗ trợ cả RL (Reinforce) và Imitation Learning.
+    Gradient được tích lũy thủ công, runner cần gọi optimizer.step() ở ngoài.
     """
 
     def __init__(
@@ -107,16 +108,8 @@ class ReinforceTrainer:
         max_steps: Optional[int] = None,
     ) -> TrainStats:
         """
-        Chạy 1 batch episode song song (batch_size environment),
-        rồi update policy + value mạng.
-
-        Args:
-            env: SVRPEnvironment mới
-            batch_size: số episode song song
-            max_steps: giới hạn số bước (mặc định = scenario.max_horizon)
-
-        Returns:
-            TrainStats
+        Chạy 1 batch RL.
+        LƯU Ý: Hàm này KHÔNG gọi optimizer.step(). Nó chỉ backward loss (tích lũy gradient).
         """
         if max_steps is None:
             max_steps = self.scenario.max_horizon
@@ -151,6 +144,110 @@ class ReinforceTrainer:
         )
         return stats
 
+    def backward_imitation(
+        self,
+        env,
+        demonstration_list: List[Tuple[int, List[int]]],
+        lambda_il: float = 0.5
+    ) -> float:
+        """
+        Tính toán Loss Imitation (CrossEntropy) dựa trên demonstrations và gọi backward()
+        để cộng dồn gradient vào mạng Policy.
+        Args:
+            demonstration_list: List các tuple (index_trong_batch, route_mẫu)
+        """
+        if not demonstration_list:
+            return 0.0
+            
+        self.policy.train()
+        
+        # Lấy danh sách index cần train imitation
+        indices = [x[0] for x in demonstration_list]
+        
+        # State phải là state ban đầu (được reset từ bên ngoài trước khi gọi hàm này)
+        state = env.state
+        
+        criterion = nn.CrossEntropyLoss(reduction='none') # Để tự mask
+        total_loss = 0
+        
+        # Tìm max length của các demo routes
+        max_len = max([len(x[1]) for x in demonstration_list])
+        
+        lstm_hidden = None
+        
+        batch_size = env.state.customers.demand.size(0)
+        done = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        
+        # Mask đánh dấu những sample nào có demo
+        has_demo_mask = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
+        has_demo_mask[indices] = True
+        
+        # Forward loop
+        for t in range(max_len - 1):
+            action_mask = env.get_action_mask().to(self.device)
+            
+            logits, next_lstm_hidden = self.policy(state, action_mask, lstm_hidden)
+            lstm_hidden = next_lstm_hidden
+            
+            # Mask action không hợp lệ
+            logits = logits.masked_fill(~action_mask, -1e9)
+            
+            # --- FIX: Squeeze dimension xe (K) nếu có ---
+            # Input [B, K, N] -> [B, N] để khớp CrossEntropyLoss
+            if logits.dim() == 3:
+                logits_squeezed = logits.squeeze(1)
+            else:
+                logits_squeezed = logits
+            
+            target_actions = []
+            valid_mask = []
+            
+            for b in range(batch_size):
+                if b in indices:
+                    # Tìm route tương ứng
+                    route = next(r for i, r in demonstration_list if i == b)
+                    if t + 1 < len(route):
+                        target_actions.append(route[t+1])
+                        valid_mask.append(True)
+                    else:
+                        target_actions.append(0) # Padding
+                        valid_mask.append(False)
+                else:
+                    target_actions.append(0)
+                    valid_mask.append(False)
+            
+            target_tensor = torch.tensor(target_actions, device=self.device, dtype=torch.long)
+            step_mask = torch.tensor(valid_mask, device=self.device, dtype=torch.bool)
+            
+            # Chỉ tính loss nếu bước này có mẫu demo nào valid
+            if step_mask.any():
+                loss = criterion(logits_squeezed, target_tensor)
+                # Chỉ lấy loss của những mẫu valid
+                masked_loss = (loss * step_mask.float()).sum() / (step_mask.sum() + 1e-6)
+                total_loss += masked_loss
+
+            # Teacher Forcing: Step môi trường theo Target
+            # Cần unsqueeze để trả về shape [B, K] cho env (giả sử K=1)
+            actions = target_tensor.unsqueeze(1)
+            
+            next_state, _, done_step, _ = env.step(actions)
+            state = next_state
+            
+            done = done | done_step
+            if done.all():
+                break
+        
+        # Scale loss và nhân với trọng số lambda
+        final_il_loss = (total_loss / float(max_len)) * lambda_il
+        
+        # Backward tích lũy gradient
+        final_il_loss.backward()
+        
+        if self.max_grad_norm is not None:
+             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+
+        return final_il_loss.item()
+
     def _rollout(
         self,
         env,
@@ -161,7 +258,8 @@ class ReinforceTrainer:
         self.policy.train()
         self.value_net.train()
 
-        state: SVRPState = env.reset(batch_size)
+        # Lưu ý: env đã được reset ở bên ngoài (trong runner)
+        state = env.state
         B = batch_size
         done = torch.zeros(B, dtype=torch.bool, device=self.device)
 
@@ -181,12 +279,10 @@ class ReinforceTrainer:
             
             lstm_hidden = next_lstm_hidden 
 
-            # Masking logits
             logits = logits.masked_fill(~action_mask, -1e9)
             probs = torch.softmax(logits, dim=-1)
             log_probs_all = torch.log_softmax(logits, dim=-1)
 
-            # Sampling Action
             B_, K, N = probs.shape
             probs_flat = probs.view(B_ * K, N)
             actions_flat = torch.multinomial(probs_flat, 1)
@@ -232,16 +328,12 @@ class ReinforceTrainer:
             "masks": masks,
         }
 
-
     def _compute_returns_and_advantages(
         self,
-        rewards: Tensor,   # [T,B]
-        values: Tensor,    # [T,B]
-        masks: Tensor,     # [T,B]
+        rewards: Tensor,
+        values: Tensor,
+        masks: Tensor,
     ) -> Tuple[Tensor, Tensor]:
-        """
-        Tính discounted returns + advantages = R_t - V(s_t)
-        """
         T, B = rewards.shape
         device = rewards.device
 
@@ -255,59 +347,55 @@ class ReinforceTrainer:
         advantages = returns - values
         return returns, advantages
 
-
     def _update_policy(
         self,
-        log_probs: Tensor,   # [T,B]
-        entropies: Tensor,   # [T,B]
-        advantages: Tensor,  # [T,B]
-        masks: Tensor,       # [T,B]
+        log_probs: Tensor,
+        entropies: Tensor,
+        advantages: Tensor,
+        masks: Tensor,
     ) -> float:
-        """
-        L(θ) = - E[ advantage * log_prob ] - λ * H
-        """
-        # mask out steps sau khi done
         mask = masks
-
-        # policy gradient term
-        pg_term = -log_probs * advantages.detach() * mask  # [T,B]
+        pg_term = -log_probs * advantages.detach() * mask
         policy_loss = pg_term.sum(dim=0).mean()
 
-        # entropy term
         entropy_term = entropies * mask
         entropy_loss = -self.entropy_weight * entropy_term.sum(dim=0).mean()
 
         loss = policy_loss + entropy_loss
 
-        self.policy_optim.zero_grad()
+        # --- MODIFIED: Không zero_grad và không step tại đây ---
+        # self.policy_optim.zero_grad() 
         loss.backward()
         if self.max_grad_norm is not None:
             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-        self.policy_optim.step()
+        # self.policy_optim.step()
 
         return loss.item()
 
-
     def _update_value(
         self,
-        values: Tensor,   # [T,B]
-        returns: Tensor,  # [T,B]
-        masks: Tensor,    # [T,B]
+        values: Tensor,
+        returns: Tensor,
+        masks: Tensor,
     ) -> float:
-        """
-        L_v = MSE( V(s_t), R_t )
-        """
         mask = masks
-
         mse = (values - returns) ** 2
         masked_mse = mse * mask
         value_loss = masked_mse.sum(dim=0).mean()
 
-        self.value_optim.zero_grad()
+        # --- MODIFIED: Không zero_grad và không step tại đây ---
+        # self.value_optim.zero_grad()
         value_loss.backward()
-        self.value_optim.step()
+        # self.value_optim.step()
 
         return value_loss.item()
+
+    def step_optimizers(self):
+        """Helper để gọi step ở ngoài vòng lặp"""
+        self.policy_optim.step()
+        self.value_optim.step()
+        self.policy_optim.zero_grad()
+        self.value_optim.zero_grad()
 
     def save(self, path_prefix: str):
         torch.save(self.policy.state_dict(), f"{path_prefix}_policy.pt")
