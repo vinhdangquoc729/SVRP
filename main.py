@@ -32,7 +32,8 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=100)
     parser.add_argument("--log_interval", type=int, default=10)
     parser.add_argument("--eval_interval", type=int, default=20)
-    parser.add_argument("--test_episodes", type=int, default=10)
+    parser.add_argument("--val_episodes", type=int, default=20, help="Số lượng mẫu để validate mỗi khi eval")
+    parser.add_argument("--test_episodes", type=int, default=100, help="Số lượng mẫu để test cuối cùng")
     # parser.add_argument("--max_horizon", type=int, default=20)
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--seed", type=int, default=42)
@@ -85,6 +86,7 @@ def main():
         max_steps=args.max_steps,
         log_interval=args.log_interval,
         eval_interval=args.eval_interval,
+        val_episodes=args.val_episodes,
         test_episodes=args.test_episodes,
         save_dir=args.save_dir,
         device=device,
@@ -101,11 +103,16 @@ def main():
 
     if args.mode == "train":
         runner.train()
-    else:
+        print("\n=== Training Finished. Running Final Test on TEST SET ===")
+        runner.evaluate(num_instances=0, dataset=runner.test_set)
+        
+    else: # mode == "test"
         if args.load is None:
             raise ValueError("--mode test cần --load path_prefix")
         runner.load(args.load)
-        runner.evaluate(train_cfg.test_episodes)
+        
+        print(f"\n=== Running Evaluation on TEST SET (Seed {args.seed}) ===")
+        runner.evaluate(num_instances=0, dataset=runner.test_set)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,8 @@ class TrainConfig:
     max_steps: int = 100
     log_interval: int = 10
     eval_interval: int = 20
-    test_episodes: int = 100
+    val_episodes: int = 20    
+    test_episodes: int = 100  
     save_dir: str = "checkpoints"
     device: str = "cpu"
     seed: int = 42
@@ -117,12 +118,21 @@ class ExperimentRunner:
 
         self.best_eval_cost: float = float("inf")
 
-        print(f"Generating fixed validation set of {train_cfg.test_episodes} episodes...")
+        print(f"Generating FIXED datasets with seed {train_cfg.seed}...")
+        
+        # 1. Tạo Validation Set (dùng để eval trong lúc train)
         self.validation_set = []
-        for _ in range(train_cfg.test_episodes):
+        for _ in range(train_cfg.val_episodes):
             state = self.env.reset(batch_size=1)
             self.validation_set.append(state.clone())
-        print("Validation set generated and stored.")
+        print(f"  -> Validation set: {len(self.validation_set)} episodes generated.")
+
+        # 2. Tạo Test Set (dùng để test sau khi train xong)
+        self.test_set = []
+        for _ in range(train_cfg.test_episodes): # Hoặc một số lượng khác nếu muốn
+            state = self.env.reset(batch_size=1)
+            self.test_set.append(state.clone())
+        print(f"  -> Test set: {len(self.test_set)} episodes generated.")
     def train(self):
         for epoch in range(1, self.cfg.epochs + 1):
             stats = self.trainer.train_batch(
@@ -149,7 +159,8 @@ class ExperimentRunner:
                 self.writer.add_scalar("train/baseline_loss", baseline_loss, epoch)
 
             if epoch % self.cfg.eval_interval == 0:
-                eval_mean_cost = self.evaluate(self.cfg.test_episodes)
+                print(f"--- Evaluating on VALIDATION set (Epoch {epoch}) ---")
+                eval_mean_cost = self.evaluate(self.cfg.test_episodes, dataset=self.validation_set)
                 if self.writer is not None:
                     self.writer.add_scalar("eval/mean_cost", eval_mean_cost, epoch)
 
@@ -170,7 +181,11 @@ class ExperimentRunner:
         self._save(final_path)
         print(f"Training done, final model saved to {final_path}")
 
-    def evaluate(self, num_instances: int) -> float:
+    def evaluate(self, num_instances: int, dataset: list[SVRPState] = None) -> float:
+        """
+        Nếu có dataset, chạy eval trên dataset đó.
+        Nếu không có dataset, tự sinh ngẫu nhiên num_instances (logic cũ).
+        """
         self.policy.eval()
         costs = {
             "RL": 0.0,
@@ -179,12 +194,22 @@ class ExperimentRunner:
             "RL_Special": 0.0, "Pure_Special": 0.0,
         }
 
-        for i in range(num_instances):
-            state_base = self.env.reset(batch_size=1)
+        # Xác định nguồn dữ liệu để chạy
+        if dataset is not None:
+            # Nếu truyền dataset cố định vào thì dùng nó
+            iterator = dataset
+            actual_num = len(dataset)
+        else:
+            # Nếu không thì sinh ngẫu nhiên (như cũ)
+            iterator = [self.env.reset(batch_size=1) for _ in range(num_instances)]
+            actual_num = num_instances
+
+        for i, state_base in enumerate(iterator):
+            # Không gọi self.env.reset() ở đây nữa mà dùng state từ list
             fixed_state = state_base.clone()
+            
             def run_strat(name, inf_obj, save_img=False):
                 self.env.reset_by_state(fixed_state)
-                
                 routes, cost, _ = inf_obj.solve_one(self.env)
                 costs[name] += cost
                 if save_img:
@@ -192,31 +217,19 @@ class ExperimentRunner:
                                    save_path=str(self.save_dir / f"inst_{i}_{name}.png"))
                 return cost
             
-            save = (i == 0) # Save image for 1st instance
+            save = (i == 0) 
             
-            # 1. RL
+            # Chạy các chiến thuật
             run_strat("RL", self.inference_rl, save)
-            
-            # 2. RL + GA
             run_strat("RL_GA", self.inference_ea, save)
-            
-            # 3. Pure GA
             run_strat("Pure_GA", self.inference_pure_ga, save)
-            
-            # 4. RL + MPEAX
             run_strat("RL_MPEAX", self.inference_rl_mpeax, save)
-            
-            # 5. Pure MPEAX
             run_strat("Pure_MPEAX", self.inference_pure_mpeax, save)
-            
-            # 6. RL + Special Hybrid
             run_strat("RL_Special", self.inference_rl_special, save)
-            
-            # 7. Pure Special Hybrid
             run_strat("Pure_Special", self.inference_pure_special, save)
 
-        means = {k: v / num_instances for k, v in costs.items()}
-        print(f"===> Eval Results (N={num_instances}):")
+        means = {k: v / actual_num for k, v in costs.items()}
+        print(f"===> Eval Results (N={actual_num}):")
         print(f"  1. RL              : {means['RL']:.4f}")
         print(f"  2. RL + GA         : {means['RL_GA']:.4f}")
         print(f"  3. Pure GA         : {means['Pure_GA']:.4f}")
