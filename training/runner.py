@@ -34,6 +34,7 @@ class TrainConfig:
     device: str = "cpu"
     seed: int = 42
     d_model: int = 128
+    value_update_freq: int = 5  # Update value network every N epochs
 
 InferenceName = Literal["greedy", "sampling"]
 
@@ -134,13 +135,14 @@ class ExperimentRunner:
         print(f"  -> Test set: {len(self.test_set)} episodes generated.")
     def train(self):
         # Cấu hình Chiến thuật
-        WARMUP_EPOCHS = 200     # Chỉ dùng GA hướng dẫn trong 20 epoch đầu
+        WARMUP_EPOCHS = 100
         LAMBDA_IL = 0.8    # Trọng số Imitation Learning
         NUM_DEMO_PER_BATCH = 16 # Số lượng mẫu chạy GA
 
         print(f"Starting Training: {self.cfg.epochs} epochs")
         print(f" - Phase 1 (Epoch 1-{WARMUP_EPOCHS}): Mixed Strategy (RL + GA Guidance)")
         print(f" - Phase 2 (Epoch {WARMUP_EPOCHS+1}+): Pure RL (Reinforce)")
+        print(f" - Value Update Frequency: every {self.cfg.value_update_freq} epochs")
 
         history =  {
             "RL": [],
@@ -155,9 +157,12 @@ class ExperimentRunner:
             state = self.env.reset(batch_size=self.cfg.batch_size)
             initial_state_clone = state.clone() 
             
-            # Reset Gradients chung
+            # Reset Gradients
             self.trainer.policy_optim.zero_grad()
-            self.trainer.value_optim.zero_grad()
+            
+            # Only zero value gradient at start of accumulation cycle
+            if (epoch - 1) % self.cfg.value_update_freq == 0:
+                self.trainer.value_optim.zero_grad()
             
             loss_il = 0.0
             phase_name = "RL"
@@ -214,7 +219,13 @@ class ExperimentRunner:
             # ===============================================
             # CẬP NHẬT TRỌNG SỐ
             # ===============================================
-            self.trainer.step_optimizers()
+            # Always update policy
+            self.trainer.step_policy_optimizer()
+            
+            # Only update value periodically
+            if epoch % self.cfg.value_update_freq == 0:
+                self.trainer.step_value_optimizer()
+                print(f"    [Value network updated at epoch {epoch}]")
 
             # Logging
             print(
@@ -258,33 +269,20 @@ class ExperimentRunner:
         final_path = self.save_dir / "model_final"
         self._save(final_path)
         print(f"Training done, final model saved to {final_path}")
+        # Note: Win-rate will be calculated after final test on evaluation set
 
-        # Calculate win rate (percentage of times winning) matrix of each pair algorithms like ("RL", "RL_GA"), ("RL", "Pure_GA"), ...
-        algorithms = ["RL", "RL_GA", "Pure_GA", "RL_MPEAX", "Pure_MPEAX", "RL_Special", "Pure_Special"]
-        win_rate = {}
-
-        for algo1 in algorithms:
-            win_rate[algo1] = {}
-            for algo2 in algorithms:
-                if algo1 == algo2:
-                    win_rate[algo1][algo2] = 0.5
-                else:
-                    win_rate[algo1][algo2] = (history[algo1] < history[algo2]).sum() / len(history[algo1])
-
-        # Print win rate matrix
-        print("\nWin rate matrix:")
-        for algo1 in algorithms:
-            print(" ".join(f"{win_rate[algo1][algo2]:.2f}" for algo2 in algorithms))
-
-        # Save win rate matrix to file
-        with open(self.save_dir / "win_rate_matrix.txt", "w") as f:
-            for algo1 in algorithms:
-                f.write(" ".join(f"{win_rate[algo1][algo2]:.2f}" for algo2 in algorithms) + "\n")
-
-    def evaluate(self, num_instances: int, dataset: list[SVRPState] = None) -> float:
+    def evaluate(self, num_instances: int, dataset: list[SVRPState] = None, return_per_instance: bool = False):
         """
-        Nếu có dataset, chạy eval trên dataset đó.
-        Nếu không có dataset, tự sinh ngẫu nhiên num_instances (logic cũ).
+        Evaluate policy on instances.
+        
+        Args:
+            num_instances: Number of instances to evaluate (used if dataset is None)
+            dataset: Fixed dataset to evaluate on (if provided)
+            return_per_instance: If True, return per-instance costs for win-rate calculation
+            
+        Returns:
+            If return_per_instance=False: dict of mean costs
+            If return_per_instance=True: (dict of mean costs, dict of per-instance cost lists)
         """
         self.policy.eval()
         costs = {
@@ -293,6 +291,15 @@ class ExperimentRunner:
             "RL_MPEAX": 0.0, "Pure_MPEAX": 0.0,
             "RL_Special": 0.0, "Pure_Special": 0.0,
         }
+        
+        # Per-instance costs for win-rate calculation
+        if return_per_instance:
+            per_instance_costs = {
+                "RL": [],
+                "RL_GA": [], "Pure_GA": [],
+                "RL_MPEAX": [], "Pure_MPEAX": [],
+                "RL_Special": [], "Pure_Special": [],
+            }
 
         # Xác định nguồn dữ liệu để chạy
         if dataset is not None:
@@ -312,6 +319,8 @@ class ExperimentRunner:
                 self.env.reset_by_state(fixed_state)
                 routes, cost, _ = inf_obj.solve_one(self.env)
                 costs[name] += cost
+                if return_per_instance:
+                    per_instance_costs[name].append(cost)
                 if save_img:
                      plot_instance(fixed_state, 0, routes, title=f"{name} (Cost {cost:.2f})", 
                                    save_path=str(self.save_dir / f"inst_{i}_{name}.png"))
@@ -338,7 +347,80 @@ class ExperimentRunner:
         print(f"  6. RL + Special    : {means['RL_Special']:.4f}")
         print(f"  7. Pure Special    : {means['Pure_Special']:.4f}")
         
+        if return_per_instance:
+            return means, per_instance_costs
         return means
+    
+    def calculate_and_display_winrate(self, per_instance_costs: dict):
+        """
+        Calculate and display win-rate matrix from per-instance costs.
+        
+        Args:
+            per_instance_costs: Dict mapping algorithm names to lists of per-instance costs
+        """
+        import numpy as np
+        
+        algorithms = ["RL", "RL_GA", "Pure_GA", "RL_MPEAX", "Pure_MPEAX", "RL_Special", "Pure_Special"]
+        win_rate = {}
+        
+        print("\n" + "="*60)
+        print("WIN-RATE MATRIX (based on final test results)")
+        print("="*60)
+        print(f"Calculated from {len(per_instance_costs['RL'])} test instances")
+        print("Row wins against Column (lower cost wins)")
+        print()
+        
+        for algo1 in algorithms:
+            win_rate[algo1] = {}
+            for algo2 in algorithms:
+                if algo1 == algo2:
+                    win_rate[algo1][algo2] = 0.5
+                else:
+                    # Compare instance by instance
+                    costs1 = np.array(per_instance_costs[algo1])
+                    costs2 = np.array(per_instance_costs[algo2])
+                    # algo1 wins when its cost is lower
+                    win_rate[algo1][algo2] = (costs1 < costs2).sum() / len(costs1)
+        
+        # Print header
+        print(f"{'Algorithm':<15}", end="")
+        for algo in algorithms:
+            print(f"{algo:<10}", end="")
+        print()
+        print("-" * 85)
+        
+        # Print matrix
+        for algo1 in algorithms:
+            print(f"{algo1:<15}", end="")
+            for algo2 in algorithms:
+                print(f"{win_rate[algo1][algo2]:<10.2f}", end="")
+            print()
+        
+        print()
+        
+        # Save win rate matrix to file
+        with open(self.save_dir / "win_rate_matrix.txt", "w") as f:
+            f.write("Win-rate Matrix (based on final test results)\n")
+            f.write(f"Calculated from {len(per_instance_costs['RL'])} test instances\n")
+            f.write("Row wins against Column (lower cost wins)\n\n")
+            
+            # Header
+            f.write(f"{'Algorithm':<15}")
+            for algo in algorithms:
+                f.write(f"{algo:<10}")
+            f.write("\n")
+            f.write("-" * 85 + "\n")
+            
+            # Matrix
+            for algo1 in algorithms:
+                f.write(f"{algo1:<15}")
+                for algo2 in algorithms:
+                    f.write(f"{win_rate[algo1][algo2]:<10.2f}")
+                f.write("\n")
+        
+        print(f"Win-rate matrix saved to {self.save_dir / 'win_rate_matrix.txt'}")
+        print("="*60)
+        print()
 
     def _save(self, path_prefix: Path):
         path_prefix = Path(path_prefix)

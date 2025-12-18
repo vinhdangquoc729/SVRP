@@ -390,12 +390,20 @@ class ReinforceTrainer:
 
         return value_loss.item()
 
-    def step_optimizers(self):
-        """Helper để gọi step ở ngoài vòng lặp"""
+    def step_policy_optimizer(self):
+        """Update policy network only"""
         self.policy_optim.step()
-        self.value_optim.step()
         self.policy_optim.zero_grad()
+    
+    def step_value_optimizer(self):
+        """Update value network only"""
+        self.value_optim.step()
         self.value_optim.zero_grad()
+    
+    def step_optimizers(self):
+        """Update both optimizers (backward compatibility)"""
+        self.step_policy_optimizer()
+        self.step_value_optimizer()
 
     def save(self, path_prefix: str):
         torch.save(self.policy.state_dict(), f"{path_prefix}_policy.pt")

@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--max_horizon", type=int, default=100)
 
     # Train config
-    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--epochs", type=int, default=400)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--baseline_lr", type=float, default=1e-3)
@@ -38,6 +38,12 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--d_model", type=int, default=128)
+    parser.add_argument(
+        "--value_update_freq",
+        type=int,
+        default=5,
+        help="Update value network every N epochs (default: 5)",
+    )
     parser.add_argument(
         "--cuda",
         action="store_true",
@@ -92,6 +98,7 @@ def main():
         device=device,
         seed=args.seed,
         d_model=args.d_model,
+        value_update_freq=args.value_update_freq,
     )
 
     runner = ExperimentRunner(
@@ -104,15 +111,31 @@ def main():
     if args.mode == "train":
         runner.train()
         print("\n=== Training Finished. Running Final Test on TEST SET ===")
-        runner.evaluate(num_instances=0, dataset=runner.test_set)
+        # Get per-instance costs for win-rate calculation
+        mean_costs, per_instance_costs = runner.evaluate(
+            num_instances=0, 
+            dataset=runner.test_set,
+            return_per_instance=True
+        )
         
-    else: # mode == "test"
+        # Calculate and display win-rate matrix
+        runner.calculate_and_display_winrate(per_instance_costs)
+        
+    else:  # mode == "test"
         if args.load is None:
             raise ValueError("--mode test cần --load path_prefix")
         runner.load(args.load)
         
         print(f"\n=== Running Evaluation on TEST SET (Seed {args.seed}) ===")
-        runner.evaluate(num_instances=0, dataset=runner.test_set)
+        # Get per-instance costs for win-rate calculation
+        mean_costs, per_instance_costs = runner.evaluate(
+            num_instances=0, 
+            dataset=runner.test_set,
+            return_per_instance=True
+        )
+        
+        # Calculate and display win-rate matrix
+        runner.calculate_and_display_winrate(per_instance_costs)
 
 
 if __name__ == "__main__":
