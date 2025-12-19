@@ -282,11 +282,11 @@ class HybridEvolutionaryInference(InferenceStrategy):
                     else:
                          p1 = self._tournament_selection(population, fitnesses)
                          p2 = self._tournament_selection(population, fitnesses)
-                         child = self._ordered_crossover(p1, p2)
+                         child = self._pmx_crossover(p1, p2)
                 else:
                     p1 = self._tournament_selection(population, fitnesses)
                     p2 = self._tournament_selection(population, fitnesses)
-                    child = self._ordered_crossover(p1, p2)
+                    child = self._pmx_crossover(p1, p2)
                 
                 if random.random() < self.mutation_rate:
                     child = self._swap_mutation(child)
@@ -389,26 +389,41 @@ class HybridEvolutionaryInference(InferenceStrategy):
         best_idx = min(indices, key=lambda i: fits[i])
         return pop[best_idx]
 
-    def _ordered_crossover(self, p1, p2):
+    def _pmx_crossover(self, p1, p2):
         size = len(p1)
         if size < 2: return p1 
         
         start, end = sorted(random.sample(range(size), 2))
+        
         child = [None] * size
+        
+        # Copy segment from p1
         child[start:end] = p1[start:end]
         
-        current_p2_idx = 0
+        # Fill in elements from p2 that are not in child
+        # Mapping: p1[i] <-> p2[i] for i in range(start, end)
+        
+        p1_segment_set = set(p1[start:end])
+        
+        for i in range(start, end):
+            val = p2[i]
+            if val not in p1_segment_set:
+                # Find valid spot for val
+                curr = i
+                while True:
+                    val_at_curr_in_p1 = p1[curr]
+                    # Find where this val is in p2
+                    idx = p2.index(val_at_curr_in_p1)
+                    if not (start <= idx < end):
+                        child[idx] = val
+                        break
+                    else:
+                        curr = idx
+
+        # Fill rest from p2
         for i in range(size):
             if child[i] is None:
-                while current_p2_idx < size and p2[current_p2_idx] in child:
-                    current_p2_idx += 1
-                if current_p2_idx < size:
-                    child[i] = p2[current_p2_idx]
-        
-        remaining = [x for x in p2 if x not in child and x is not None]
-        for i in range(size):
-            if child[i] is None and remaining:
-                child[i] = remaining.pop(0)
+                child[i] = p2[i]
                 
         return child
 
