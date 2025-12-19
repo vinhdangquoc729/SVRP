@@ -89,8 +89,9 @@ class StochasticInstanceGenerator:
         weather = torch.randn(batch_size, cfg.weather_dim, device=device)
 
         if cfg.fixed_customers and self._fixed_coords is not None:
-            coords = self._fixed_coords.to(device)
-            base_dist = self._compute_distance_matrix(coords)
+            base_coords = self._fixed_coords.to(device)
+            base_dist = self._compute_distance_matrix(base_coords)
+            coords = base_coords.unsqueeze(0).expand(batch_size, -1, -1)
             base_dist = base_dist.unsqueeze(0).expand(batch_size, -1, -1)
         else:
             coords = torch.rand(batch_size, N, 2, device=device)

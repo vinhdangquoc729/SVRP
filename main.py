@@ -10,6 +10,7 @@ def build_scenario_from_args(args) -> ScenarioConfig:
         num_customers=args.num_customers,
         num_vehicles=args.num_vehicles,
         capacity=args.capacity,
+        fixed_customers=True,
         max_horizon=args.max_horizon,
     )
 
@@ -24,7 +25,7 @@ def parse_args():
     parser.add_argument("--max_horizon", type=int, default=100)
 
     # Train config
-    parser.add_argument("--epochs", type=int, default=400)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--baseline_lr", type=float, default=1e-3)

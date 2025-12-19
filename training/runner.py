@@ -135,7 +135,7 @@ class ExperimentRunner:
         print(f"  -> Test set: {len(self.test_set)} episodes generated.")
     def train(self):
         # Cấu hình Chiến thuật
-        WARMUP_EPOCHS = 100
+        WARMUP_EPOCHS = 60
         LAMBDA_IL = 0.8    # Trọng số Imitation Learning
         NUM_DEMO_PER_BATCH = 16 # Số lượng mẫu chạy GA
 
