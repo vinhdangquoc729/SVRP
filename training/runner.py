@@ -147,7 +147,6 @@ class ExperimentRunner:
         history =  {
             "RL": [],
             "RL_GA": [], "Pure_GA": [],
-            "RL_MPEAX": [], "Pure_MPEAX": [],
             "RL_Special": [], "Pure_Special": [],
         }
 
@@ -248,8 +247,6 @@ class ExperimentRunner:
                 history["RL"].append(eval_mean_cost["RL"])
                 history["RL_GA"].append(eval_mean_cost["RL_GA"])
                 history["Pure_GA"].append(eval_mean_cost["Pure_GA"])
-                history["RL_MPEAX"].append(eval_mean_cost["RL_MPEAX"])
-                history["Pure_MPEAX"].append(eval_mean_cost["Pure_MPEAX"])
                 history["RL_Special"].append(eval_mean_cost["RL_Special"])
                 history["Pure_Special"].append(eval_mean_cost["Pure_Special"])
 
@@ -288,7 +285,6 @@ class ExperimentRunner:
         costs = {
             "RL": 0.0,
             "RL_GA": 0.0, "Pure_GA": 0.0,
-            "RL_MPEAX": 0.0, "Pure_MPEAX": 0.0,
             "RL_Special": 0.0, "Pure_Special": 0.0,
         }
         
@@ -297,7 +293,6 @@ class ExperimentRunner:
             per_instance_costs = {
                 "RL": [],
                 "RL_GA": [], "Pure_GA": [],
-                "RL_MPEAX": [], "Pure_MPEAX": [],
                 "RL_Special": [], "Pure_Special": [],
             }
 
@@ -332,8 +327,7 @@ class ExperimentRunner:
             run_strat("RL", self.inference_rl, save)
             run_strat("RL_GA", self.inference_ea, save)
             run_strat("Pure_GA", self.inference_pure_ga, save)
-            run_strat("RL_MPEAX", self.inference_rl_mpeax, save)
-            run_strat("Pure_MPEAX", self.inference_pure_mpeax, save)
+          
             run_strat("RL_Special", self.inference_rl_special, save)
             run_strat("Pure_Special", self.inference_pure_special, save)
 
@@ -342,10 +336,8 @@ class ExperimentRunner:
         print(f"  1. RL              : {means['RL']:.4f}")
         print(f"  2. RL + GA         : {means['RL_GA']:.4f}")
         print(f"  3. Pure GA         : {means['Pure_GA']:.4f}")
-        print(f"  4. RL + MPEAX      : {means['RL_MPEAX']:.4f}")
-        print(f"  5. Pure MPEAX      : {means['Pure_MPEAX']:.4f}")
-        print(f"  6. RL + Special    : {means['RL_Special']:.4f}")
-        print(f"  7. Pure Special    : {means['Pure_Special']:.4f}")
+        print(f"  4. RL + Special    : {means['RL_Special']:.4f}")
+        print(f"  5. Pure Special    : {means['Pure_Special']:.4f}")
         
         if return_per_instance:
             return means, per_instance_costs
@@ -360,7 +352,7 @@ class ExperimentRunner:
         """
         import numpy as np
         
-        algorithms = ["RL", "RL_GA", "Pure_GA", "RL_MPEAX", "Pure_MPEAX", "RL_Special", "Pure_Special"]
+        algorithms = ["RL", "RL_GA", "Pure_GA", "RL_Special", "Pure_Special"]
         win_rate = {}
         
         print("\n" + "="*60)
